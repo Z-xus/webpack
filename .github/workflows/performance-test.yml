@@ -22,7 +22,6 @@ jobs:
     - name: Install Dependencies
       run: |
         yarn install
-        yarn add --dev benchmark
         yarn link
         yarn link webpack
 
