@@ -1,0 +1,85 @@
+name: Performance Testing
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        repository: webpack/webpack
+        ref: main
+
+    - name: Use Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'yarn'
+
+    - name: Install Dependencies
+      run: |
+        yarn install
+        yarn add --dev benchmark
+        yarn link
+        yarn link webpack
+
+    - name: Checkout PR Branch
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ github.head_ref }}
+
+    - name: Generate Baseline Performance Report
+      run: |
+        if [ ! -f ".github/scripts/performance-benchmark.js" ]; then
+          echo "Error: Baseline benchmark script not found"
+          exit 1
+        fi
+        node .github/scripts/performance-benchmark.js baseline-performance.json
+
+    - name: Install PR Dependencies
+      run: |
+        yarn install
+        yarn link
+        yarn link webpack
+
+    - name: Generate PR Performance Report
+      run: |
+        node .github/scripts/performance-benchmark.js pr-performance.json
+
+    - name: Analyze Performance
+      run: |
+        node .github/scripts/performance-analysis.js baseline-performance.json pr-performance.json
+
+    - name: Create Performance Report If Missing
+      run: |
+        const fs = require('fs');
+        const reportPath = '.github/scripts/performance-report.md';
+        if (!fs.existsSync(reportPath)) {
+          fs.writeFileSync(reportPath, '# Performance Report\n\nNo performance data available');
+        }
+
+    - name: Add Performance Report as PR Comment
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{secrets.GITHUB_TOKEN}}
+        script: |
+          const fs = require('fs');
+          const reportPath = '.github/scripts/performance-report.md';
+
+          try {
+            const reportContent = fs.readFileSync(reportPath, 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: reportContent
+            });
+          } catch (error) {
+            console.error('Error reading performance report:', error);
+            core.setFailed('Failed to read performance report');
+          }
