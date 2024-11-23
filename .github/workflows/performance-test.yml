@@ -1,58 +1,60 @@
 name: Performance Testing
-
 on:
   pull_request:
     branches: [main]
-
 jobs:
   performance-test:
     runs-on: ubuntu-latest
     steps:
+    # First checkout the main branch for baseline
     - uses: actions/checkout@v3
       with:
         repository: webpack/webpack
         ref: main
+        path: webpack-main
 
+    # Setup Node.js
     - name: Use Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '18'
         cache: 'yarn'
+        cache-dependency-path: '**/yarn.lock'
 
-    - name: Install Dependencies
+    # Install main branch dependencies and generate baseline
+    - name: Install Main Dependencies and Generate Baseline
+      working-directory: webpack-main
       run: |
         yarn install
-        yarn link
-        # yarn link webpack
-
-    - name: Checkout PR Branch
-      uses: actions/checkout@v3
-      with:
-        ref: ${{ github.head_ref }}
-
-    - name: Generate Baseline Performance Report
-      run: |
+        yarn add benchmark
         if [ ! -f ".github/scripts/performance-benchmark.js" ]; then
           echo "Error: Baseline benchmark script not found"
           exit 1
         fi
-        node .github/scripts/performance-benchmark.js baseline-performance.json
+        node .github/scripts/performance-benchmark.js ../baseline-performance.json
 
-    - name: Install PR Dependencies
+    # Checkout PR branch
+    - uses: actions/checkout@v3
+      with:
+        path: webpack-pr
+
+    # Install PR dependencies and run benchmark
+    - name: Install PR Dependencies and Run Benchmark
+      working-directory: webpack-pr
       run: |
         yarn install
-        yarn link
-        yarn link webpack
+        yarn add benchmark
+        node .github/scripts/performance-benchmark.js ../pr-performance.json
 
-    - name: Generate PR Performance Report
-      run: |
-        node .github/scripts/performance-benchmark.js pr-performance.json
-
+    # Run analysis
     - name: Analyze Performance
+      working-directory: webpack-pr
       run: |
-        node .github/scripts/performance-analysis.js baseline-performance.json pr-performance.json
+        node .github/scripts/performance-analysis.js ../baseline-performance.json ../pr-performance.json
 
+    # Create report if missing
     - name: Create Performance Report If Missing
+      working-directory: webpack-pr
       run: |
         const fs = require('fs');
         const reportPath = '.github/scripts/performance-report.md';
@@ -60,6 +62,7 @@ jobs:
           fs.writeFileSync(reportPath, '# Performance Report\n\nNo performance data available');
         }
 
+    # Add report as PR comment
     - name: Add Performance Report as PR Comment
       if: always()
       uses: actions/github-script@v6
@@ -67,11 +70,9 @@ jobs:
         github-token: ${{secrets.GITHUB_TOKEN}}
         script: |
           const fs = require('fs');
-          const reportPath = '.github/scripts/performance-report.md';
-
+          const reportPath = 'webpack-pr/.github/scripts/performance-report.md';
           try {
             const reportContent = fs.readFileSync(reportPath, 'utf8');
-
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
