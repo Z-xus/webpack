@@ -1,0 +1,245 @@
+name: Performance Testing
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Prevent hanging jobs
+    
+    env:
+      NODE_VERSION: '18'
+      YARN_CACHE_FOLDER: .yarn-cache
+    
+    steps:
+    - name: Checkout main branch
+      uses: actions/checkout@v4  # Updated to v4
+      with:
+        repository: webpack/webpack
+        ref: main
+        path: webpack-main
+        fetch-depth: 1  # Shallow clone for faster checkout
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4  # Updated to v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'yarn'
+        cache-dependency-path: '**/yarn.lock'
+
+    - name: Setup test environment
+      run: |
+        # Create necessary directories
+        mkdir -p webpack-main/.github/scripts webpack-main/test/fixtures
+        
+        # Create test fixture
+        cat > webpack-main/test/fixtures/entry.js << 'EOF'
+        // More realistic test fixture
+        import './module1';
+        import './module2';
+        
+        const app = () => {
+          console.log('test');
+        };
+        
+        app();
+        EOF
+        
+        # Create supporting test modules
+        cat > webpack-main/test/fixtures/module1.js << 'EOF'
+        export const func1 = () => console.log('module1');
+        EOF
+        
+        cat > webpack-main/test/fixtures/module2.js << 'EOF'
+        export const func2 = () => console.log('module2');
+        EOF
+
+    - name: Create benchmark script
+      run: |
+        cat > webpack-main/.github/scripts/performance-benchmark.js << 'EOF'
+        const Benchmark = require('benchmark');
+        const webpack = require('webpack');
+        const path = require('path');
+
+        const suite = new Benchmark.Suite;
+
+        // Configuration for different test scenarios
+        const configs = {
+          development: {
+            mode: 'development',
+            devtool: 'eval-cheap-module-source-map'
+          },
+          production: {
+            mode: 'production',
+            optimization: {
+              minimize: true
+            }
+          }
+        };
+
+        Object.entries(configs).forEach(([name, config]) => {
+          suite.add(`webpack-${name}`, {
+            defer: true,
+            fn: function(deferred) {
+              webpack({
+                ...config,
+                entry: './test/fixtures/entry.js',
+                output: {
+                  path: path.resolve('/tmp', `webpack-test-${name}`),
+                  filename: 'bundle.js'
+                },
+                cache: false // Disable caching for consistent results
+              }, (err, stats) => {
+                if (err || stats.hasErrors()) {
+                  console.error(err || stats.toString());
+                  process.exit(1);
+                }
+                deferred.resolve();
+              });
+            }
+          });
+        });
+
+        // Add error handling and reporting
+        suite
+          .on('error', function(event) {
+            console.error('Benchmark error:', event.target.error);
+          })
+          .on('cycle', function(event) {
+            console.log(String(event.target));
+          })
+          .on('complete', function() {
+            const results = {
+              timestamp: new Date().toISOString(),
+              platform: process.platform,
+              nodeVersion: process.version,
+              fastest: this.filter('fastest').map('name'),
+              stats: this.map(function(bench) {
+                return {
+                  name: bench.name,
+                  hz: bench.hz,
+                  rme: bench.stats.rme,  // Relative margin of error
+                  samples: bench.stats.sample.length,
+                  mean: bench.stats.mean,
+                  deviation: bench.stats.deviation
+                };
+              })
+            };
+
+            require('fs').writeFileSync(
+              process.argv[2] || 'performance-report.json',
+              JSON.stringify(results, null, 2)
+            );
+          })
+          .run({ 'async': true });
+        EOF
+
+    - name: Install main branch dependencies
+      working-directory: webpack-main
+      run: |
+        yarn install --frozen-lockfile
+        yarn add benchmark webpack --dev
+
+    - name: Generate baseline performance
+      working-directory: webpack-main
+      run: node .github/scripts/performance-benchmark.js ../baseline-performance.json
+
+    - name: Checkout PR branch
+      uses: actions/checkout@v4
+      with:
+        path: webpack-pr
+        fetch-depth: 1
+
+    - name: Copy test files to PR directory
+      run: |
+        mkdir -p webpack-pr/.github/scripts webpack-pr/test/fixtures
+        cp webpack-main/.github/scripts/performance-benchmark.js webpack-pr/.github/scripts/
+        cp -r webpack-main/test/fixtures/* webpack-pr/test/fixtures/
+
+    - name: Install PR dependencies
+      working-directory: webpack-pr
+      run: |
+        yarn install --frozen-lockfile
+        yarn add benchmark webpack --dev
+
+    - name: Run PR performance test
+      working-directory: webpack-pr
+      run: node .github/scripts/performance-benchmark.js ../pr-performance.json
+
+    - name: Create analysis script
+      run: |
+        cat > webpack-pr/.github/scripts/performance-analysis.js << 'EOF'
+        const fs = require('fs');
+
+        function formatNumber(num) {
+          return new Intl.NumberFormat('en-US', { 
+            maximumFractionDigits: 2 
+          }).format(num);
+        }
+
+        function analyzeResults(baseline, pr) {
+          const baselineData = JSON.parse(fs.readFileSync(baseline, 'utf8'));
+          const prData = JSON.parse(fs.readFileSync(pr, 'utf8'));
+
+          const report = [
+            '# 🎯 Performance Test Results\n',
+            '## Environment',
+            `- Node.js: ${prData.nodeVersion}`,
+            `- Platform: ${prData.platform}`,
+            `- Timestamp: ${prData.timestamp}\n`,
+            '## Test Results\n'
+          ];
+
+          prData.stats.forEach((prStat, index) => {
+            const baselineStat = baselineData.stats[index];
+            const change = ((prStat.hz - baselineStat.hz) / baselineStat.hz * 100);
+            const icon = change > 0 ? '🟢' : (change < -5 ? '🔴' : '🟡');
+            
+            report.push(`### ${icon} ${prStat.name}`);
+            report.push('```');
+            report.push(`Baseline: ${formatNumber(baselineStat.hz)} ops/sec (±${formatNumber(baselineStat.rme)}% RME)`);
+            report.push(`PR: ${formatNumber(prStat.hz)} ops/sec (±${formatNumber(prStat.rme)}% RME)`);
+            report.push(`Change: ${formatNumber(change)}%`);
+            report.push('```\n');
+
+            if (change < -5) {
+              report.push('⚠️ **Warning**: Performance regression detected!\n');
+            }
+          });
+
+          fs.writeFileSync('.github/scripts/performance-report.md', report.join('\n'));
+        }
+
+        analyzeResults(process.argv[2], process.argv[3]);
+        EOF
+
+    - name: Analyze performance
+      working-directory: webpack-pr
+      run: |
+        node .github/scripts/performance-analysis.js ../baseline-performance.json ../pr-performance.json
+
+    - name: Add performance report comment
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          try {
+            const reportPath = path.join(process.env.GITHUB_WORKSPACE, 'webpack-pr', '.github/scripts/performance-report.md');
+            const reportContent = fs.readFileSync(reportPath, 'utf8');
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: reportContent
+            });
+          } catch (error) {
+            console.error('Error reading/posting performance report:', error);
+            core.setFailed('Failed to post performance report');
+          }
