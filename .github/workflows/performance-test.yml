@@ -23,7 +23,7 @@ jobs:
       run: |
         yarn install
         yarn link
-        yarn link webpack
+        # yarn link webpack
 
     - name: Checkout PR Branch
       uses: actions/checkout@v3
