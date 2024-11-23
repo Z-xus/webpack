@@ -161,7 +161,7 @@ jobs:
     - name: Install PR dependencies
       working-directory: webpack-pr
       run: |
-        yarn install --frozen-lockfile
+        yarn install
         yarn add benchmark webpack --dev
 
     - name: Run PR performance test
