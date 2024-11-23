@@ -56,11 +56,13 @@ jobs:
     - name: Create Performance Report If Missing
       working-directory: webpack-pr
       run: |
+        node -e "
         const fs = require('fs');
         const reportPath = '.github/scripts/performance-report.md';
         if (!fs.existsSync(reportPath)) {
           fs.writeFileSync(reportPath, '# Performance Report\n\nNo performance data available');
         }
+        "
 
     # Add report as PR comment
     - name: Add Performance Report as PR Comment
@@ -70,10 +72,11 @@ jobs:
         github-token: ${{secrets.GITHUB_TOKEN}}
         script: |
           const fs = require('fs');
-          const reportPath = 'webpack-pr/.github/scripts/performance-report.md';
+          const path = require('path');
+          const reportPath = path.join(process.env.GITHUB_WORKSPACE, 'webpack-pr', '.github/scripts/performance-report.md');
           try {
             const reportContent = fs.readFileSync(reportPath, 'utf8');
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -81,5 +84,5 @@ jobs:
             });
           } catch (error) {
             console.error('Error reading performance report:', error);
-            core.setFailed('Failed to read performance report');
+            core.setFailed(`Failed to read performance report from ${reportPath}`);
           }
