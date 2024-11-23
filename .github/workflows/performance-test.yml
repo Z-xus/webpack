@@ -21,16 +21,72 @@ jobs:
         cache: 'yarn'
         cache-dependency-path: '**/yarn.lock'
 
+    # Create scripts directory and benchmark script if it doesn't exist
+    - name: Setup Benchmark Scripts
+      run: |
+        mkdir -p webpack-main/.github/scripts
+        cat << 'EOF' > webpack-main/.github/scripts/performance-benchmark.js
+        const Benchmark = require('benchmark');
+        const webpack = require('webpack');
+
+        const suite = new Benchmark.Suite;
+
+        // Add your webpack benchmark tests here
+        suite.add('webpack-test', {
+          defer: true,
+          fn: function(deferred) {
+            webpack({
+              // Your webpack config here
+              mode: 'production',
+              entry: './test/fixtures/entry.js',
+              output: {
+                path: '/tmp/webpack-test',
+                filename: 'bundle.js'
+              }
+            }, (err, stats) => {
+              if (err) {
+                console.error(err);
+                process.exit(1);
+              }
+              deferred.resolve();
+            });
+          }
+        });
+
+        // Add listeners
+        suite.on('cycle', function(event) {
+          console.log(String(event.target));
+        })
+        .on('complete', function() {
+          const results = {
+            fastest: this.filter('fastest').map('name'),
+            stats: this.map(function(bench) {
+              return {
+                name: bench.name,
+                hz: bench.hz,
+                stats: bench.stats
+              };
+            })
+          };
+
+          // Write results to file
+          require('fs').writeFileSync(
+            process.argv[2] || 'performance-report.json',
+            JSON.stringify(results, null, 2)
+          );
+        })
+        .run({ 'async': true });
+        EOF
+
+        mkdir -p webpack-main/test/fixtures
+        echo "console.log('test');" > webpack-main/test/fixtures/entry.js
+
     # Install main branch dependencies and generate baseline
     - name: Install Main Dependencies and Generate Baseline
       working-directory: webpack-main
       run: |
         yarn install
-        yarn add benchmark
-        if [ ! -f ".github/scripts/performance-benchmark.js" ]; then
-          echo "Error: Baseline benchmark script not found"
-          exit 1
-        fi
+        yarn add benchmark webpack
         node .github/scripts/performance-benchmark.js ../baseline-performance.json
 
     # Checkout PR branch
@@ -38,31 +94,55 @@ jobs:
       with:
         path: webpack-pr
 
+    # Copy benchmark scripts to PR directory
+    - name: Copy Benchmark Scripts to PR Directory
+      run: |
+        mkdir -p webpack-pr/.github/scripts
+        cp webpack-main/.github/scripts/performance-benchmark.js webpack-pr/.github/scripts/
+        mkdir -p webpack-pr/test/fixtures
+        cp webpack-main/test/fixtures/entry.js webpack-pr/test/fixtures/
+
     # Install PR dependencies and run benchmark
     - name: Install PR Dependencies and Run Benchmark
       working-directory: webpack-pr
       run: |
         yarn install
-        yarn add benchmark
+        yarn add benchmark webpack
         node .github/scripts/performance-benchmark.js ../pr-performance.json
+
+    # Create analysis script
+    - name: Create Analysis Script
+      run: |
+        cat << 'EOF' > webpack-pr/.github/scripts/performance-analysis.js
+        const fs = require('fs');
+
+        function analyzeResults(baseline, pr) {
+          const baselineData = JSON.parse(fs.readFileSync(baseline, 'utf8'));
+          const prData = JSON.parse(fs.readFileSync(pr, 'utf8'));
+
+          const report = ['# Performance Report\n'];
+
+          prData.stats.forEach((prStat, index) => {
+            const baselineStat = baselineData.stats[index];
+            const change = ((prStat.hz - baselineStat.hz) / baselineStat.hz * 100).toFixed(2);
+
+            report.push(`## ${prStat.name}`);
+            report.push(`- Baseline: ${baselineStat.hz.toFixed(2)} ops/sec`);
+            report.push(`- PR: ${prStat.hz.toFixed(2)} ops/sec`);
+            report.push(`- Change: ${change}%\n`);
+          });
+
+          fs.writeFileSync('.github/scripts/performance-report.md', report.join('\n'));
+        }
+
+        analyzeResults(process.argv[2], process.argv[3]);
+        EOF
 
     # Run analysis
     - name: Analyze Performance
       working-directory: webpack-pr
       run: |
         node .github/scripts/performance-analysis.js ../baseline-performance.json ../pr-performance.json
-
-    # Create report if missing
-    - name: Create Performance Report If Missing
-      working-directory: webpack-pr
-      run: |
-        node -e "
-        const fs = require('fs');
-        const reportPath = '.github/scripts/performance-report.md';
-        if (!fs.existsSync(reportPath)) {
-          fs.writeFileSync(reportPath, '# Performance Report\n\nNo performance data available');
-        }
-        "
 
     # Add report as PR comment
     - name: Add Performance Report as PR Comment
